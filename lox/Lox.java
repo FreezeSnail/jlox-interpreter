@@ -15,6 +15,7 @@ public class Lox {
 	static boolean hadRuntimeError = false;
 
 	public static void main(String[] args) throws IOException {
+		System.out.println("Welcome to JLox interpreter, :q to quit");
 		if (args.length > 1) {
 			System.out.println("Usage: jLox [script]");
 			System.exit(64);
@@ -47,6 +48,8 @@ public class Lox {
 	}
 	
 	private static void run(String source) {
+		if(source.equals(":q")) System.exit(0);
+		
 		Scanner scanner = new Scanner(source);
 		List<Token> tokens = scanner.scanTokens();
 		
@@ -54,7 +57,13 @@ public class Lox {
 	    List<Stmt> statements = parser.parse();
 
 	    // Stop if there was a syntax error.                   
-	    if (hadError) return;                                  
+	    if (hadError) return;   
+	    
+	    Resolver resolver = new Resolver(interpreter);
+	    resolver.resolve(statements);
+	    
+	 // Stop if there was a resolution error.                   
+	    if (hadError) return;   
 
 	    interpreter.interpret(statements);
 	}

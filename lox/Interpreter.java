@@ -1,25 +1,50 @@
 package com.craftinginterpreters.lox;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import com.craftinginterpreters.lox.Expr.Assign;
 import com.craftinginterpreters.lox.Expr.Binary;
 import com.craftinginterpreters.lox.Expr.Call;
+import com.craftinginterpreters.lox.Expr.Get;
 import com.craftinginterpreters.lox.Expr.Grouping;
 import com.craftinginterpreters.lox.Expr.Literal;
 import com.craftinginterpreters.lox.Expr.Logical;
+import com.craftinginterpreters.lox.Expr.Set;
+import com.craftinginterpreters.lox.Expr.Super;
+import com.craftinginterpreters.lox.Expr.This;
 import com.craftinginterpreters.lox.Expr.Unary;
 import com.craftinginterpreters.lox.Expr.Variable;
 import com.craftinginterpreters.lox.Stmt.Block;
+import com.craftinginterpreters.lox.Stmt.Class;
 import com.craftinginterpreters.lox.Stmt.Expression;
+import com.craftinginterpreters.lox.Stmt.Function;
 import com.craftinginterpreters.lox.Stmt.If;
 import com.craftinginterpreters.lox.Stmt.Print;
 import com.craftinginterpreters.lox.Stmt.Var;
 import com.craftinginterpreters.lox.Stmt.While;
 
 class Interpreter implements Expr.Visitor<Object>, Stmt.Visitor<Void> {
-	private Environment environment = new Environment();
+	final Environment globals = new Environment();
+	private Environment environment = globals;
+	private final Map<Expr, Integer> locals = new HashMap<>();
+	
+	Interpreter(){
+		globals.define("clock", new LoxCallable() {
+			@Override
+			public int arity() { return 0; }
+			
+			@Override
+			public Object call(Interpreter interpreter, List<Object> arguments) {
+				return (double)System.currentTimeMillis() / 1000.0;
+			}
+			
+			@Override
+			public String toString() { return "<native fn>"; }
+		});
+	}
 	
 	void interpret(List<Stmt> statements) {
 		try {
@@ -29,6 +54,70 @@ class Interpreter implements Expr.Visitor<Object>, Stmt.Visitor<Void> {
 		} catch (RuntimeError error) {
 			Lox.runtimeError(error);
 		}
+	}
+	
+	private Object evaluate(Expr expr) {
+		return expr.accept(this);
+	}
+	
+	private void execute(Stmt stmt) {
+		stmt.accept(this);
+	}
+	
+	void resolve(Expr expr, int depth) {
+		locals.put(expr, depth);
+	}
+	
+	void executeBlock(List<Stmt> statements, Environment environment) {
+		Environment previous = this.environment;
+		try {
+			this.environment = environment;
+			
+			for(Stmt statement: statements) {
+				execute(statement);
+			}
+		}finally {
+			this.environment = previous;
+		}
+	}
+	
+	private boolean isTruthy(Object object) {
+		if(object == null) return false;
+		if(object instanceof Boolean) return( boolean)object;
+		return true;
+	}
+	
+	private boolean isEqual(Object a, Object b) {
+		//nil is only equal to nil
+		if(a == null && b == null) return true;
+		if(a == null) return false;
+		
+		return a.equals(b);
+	}
+	
+	private void checkNumberOperand(Token operator, Object operand) {
+		if (operand instanceof Double) return;
+		throw new RuntimeError(operator, "Operand must be a number");
+	}
+	
+	private void checkNumberOperands(Token operator, Object left, Object right) {
+		if( left instanceof Double && right instanceof Double) return;
+		
+		throw new RuntimeError(operator, "Operands must be numbers");
+	}
+	
+	private String stringify(Object object) {
+		if (object == null) return "nil";
+		
+		//hacky crap the auhor wrote
+		if(object instanceof Double) {
+			String text = object.toString();
+			if(text.endsWith(".0")) {
+				text = text.substring(0, text.length() -2);
+			}
+			return text;
+		}
+		return object.toString();
 	}
 
 	@Override
@@ -104,65 +193,6 @@ class Interpreter implements Expr.Visitor<Object>, Stmt.Visitor<Void> {
 		return null;
 	}
 	
-	private Object evaluate(Expr expr) {
-		return expr.accept(this);
-	}
-	
-	private void execute(Stmt stmt) {
-		stmt.accept(this);
-	}
-	
-	void executeBlock(List<Stmt> statements, Environment environment) {
-		Environment previous = this.environment;
-		try {
-			this.environment = environment;
-			
-			for(Stmt statement: statements) {
-				execute(statement);
-			}
-		}finally {
-			this.environment = previous;
-		}
-	}
-	
-	private boolean isTruthy(Object object) {
-		if(object == null) return false;
-		if(object instanceof Boolean) return( boolean)object;
-		return true;
-	}
-	
-	private boolean isEqual(Object a, Object b) {
-		//nil is only equal to nil
-		if(a == null && b == null) return true;
-		if(a == null) return false;
-		
-		return a.equals(b);
-	}
-	
-	private void checkNumberOperand(Token operator, Object operand) {
-		if (operand instanceof Double) return;
-		throw new RuntimeError(operator, "Operand must be a number");
-	}
-	
-	private void checkNumberOperands(Token operator, Object left, Object right) {
-		if( left instanceof Double && right instanceof Double) return;
-		
-		throw new RuntimeError(operator, "Operands must be numbers");
-	}
-	
-	private String stringify(Object object) {
-		if (object == null) return "nil";
-		
-		//hacky crap the auhor wrote
-		if(object instanceof Double) {
-			String text = object.toString();
-			if(text.endsWith(".0")) {
-				text = text.substring(0, text.length() -2);
-			}
-			return text;
-		}
-		return object.toString();
-	}
 
 	@Override
 	public Void visitExpressionStmt(Expression stmt) {
@@ -190,14 +220,28 @@ class Interpreter implements Expr.Visitor<Object>, Stmt.Visitor<Void> {
 
 	@Override
 	public Object visitVariableExpr(Variable expr) {
-		return environment.get(expr.name);
+		return lookUpVariable(expr.name, expr);
+	}
+	
+	private Object lookUpVariable(Token name, Expr expr) {
+		Integer distance = locals.get(expr);
+		if(distance != null) {
+			return environment.getAt(distance, name.lexeme);
+		} else {
+			return globals.get(name);
+		}
 	}
 
 	@Override
 	public Object visitAssignExpr(Assign expr) {
 		Object value = evaluate(expr.value);
 		
-		environment.assign(expr.name, value);
+		Integer distance = locals.get(expr);
+		if(distance != null) {
+			environment.assignAt(distance, expr.name, value);
+		} else {
+			globals.assign(expr.name, value);
+		}
 		return value;
 	}
 
@@ -256,6 +300,98 @@ class Interpreter implements Expr.Visitor<Object>, Stmt.Visitor<Void> {
 			throw new RuntimeError(expr.paren, "Expected " + function.arity() + " Arguments but got " + arguments.size() + ".");
 		}
 		return function.call(this, arguments);
+	}
+
+	@Override
+	public Void visitFunctionStmt(Function stmt) {
+		LoxFunction function = new LoxFunction(stmt, environment, false);
+		environment.define(stmt.name.lexeme, function);
+		return null;
+	}
+
+	@Override
+	public Void visitReturnStmt(Stmt.Return stmt) {
+		Object value = null;
+		if(stmt.value != null) value = evaluate(stmt.value);
+		
+		throw new Return(value);
+	}
+
+	@Override
+	public Void visitClassStmt(Class stmt) {
+		Object superclass = null;
+		if(stmt.superclass != null) {
+			superclass = evaluate(stmt.superclass);
+			if(!(superclass instanceof LoxClass)) {
+				throw new RuntimeError(stmt.superclass.name, "Superclass must be a class");
+			}
+		}
+		
+		environment.define(stmt.name.lexeme, null);
+		
+		if(stmt.superclass != null) {
+			environment = new Environment(environment);
+			environment.define("super", superclass);
+		}
+		
+		Map<String, LoxFunction> methods = new HashMap<>();
+			for(Stmt.Function method : stmt.methods) {
+				LoxFunction function = new LoxFunction(method, environment, method.name.lexeme.contentEquals("init"));
+				methods.put(method.name.lexeme, function);
+			}
+			
+		LoxClass klass = new LoxClass(stmt.name.lexeme, (LoxClass)superclass, methods);
+		
+		if(superclass != null) {
+			environment = environment.enclosing;
+		}
+		environment.assign(stmt.name, klass);
+		return null;
+	}
+
+	@Override
+	public Object visitGetExpr(Get expr) {
+		Object object = evaluate(expr.object);
+		if(object instanceof LoxInstance) {
+			return((LoxInstance) object).get(expr.name);
+		}
+		
+		throw new RuntimeError(expr.name, "Only instances have properties.");
+	}
+
+	@Override
+	public Object visitSetExpr(Set expr) {
+		Object object = evaluate(expr.object);
+				
+		if(!(object instanceof LoxInstance)) {
+			throw new RuntimeError(expr.name, "only instances have fields.");
+		}
+		
+		Object value = evaluate(expr.value);
+		((LoxInstance)object).set(expr.name, value);
+		return value;
+	}
+
+	@Override
+	public Object visitThisExpr(This expr) {
+		return lookUpVariable(expr.keyword, expr);
+	}
+
+	@Override
+	public Object visitSuperExpr(Super expr) {
+		int distance = locals.get(expr);
+		LoxClass superclass = (LoxClass)environment.getAt(distance, "super");
+		
+		//this is always one level nearer than the super's environment
+		LoxInstance object = (LoxInstance)environment.getAt(distance -1, "this");
+		
+		LoxFunction method = superclass.findMethod(expr.method.lexeme);
+		
+		if(method == null) {
+			throw new RuntimeError(expr.method, "undefined property '" + expr.method.lexeme + "'.");
+		}
+		
+		return method.bind(object);		
 	}
 	
 }
